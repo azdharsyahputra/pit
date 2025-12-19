@@ -1,0 +1,10 @@
+/nginx/*
+/php/*
+/tools/*
+
+!/php/.gitkeep
+!/nginx/.gitkeep
+!/tools/.gitkeep
+
+/pit/pit
+#on development all asset important are built locally
