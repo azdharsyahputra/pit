@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"syscall"
 
 	"pit/internal/api"
 	"pit/internal/core"
@@ -52,13 +54,26 @@ func main() {
 			os.Exit(1)
 		}
 
+		// API
 		go func() {
 			fmt.Println("✔ API started on http://localhost:7070")
 			api.StartAPIServer(engine)
 		}()
 
-		fmt.Println("\nEngine is ready.")
-		select {}
+		fmt.Println("\nEngine is ready. Press Ctrl+C to stop.")
+
+		// Graceful shutdown on Ctrl+C / SIGTERM
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		<-sigCh
+
+		fmt.Println("\n[Shutdown] Stopping PIT services...")
+		if err := engine.StopAll(); err != nil {
+			fmt.Println("Error stopping engine:", err)
+			os.Exit(1)
+		}
+		fmt.Println("✔ Engine stopped")
+		os.Exit(0)
 
 	// ----------------------------
 	// STOP ENGINE

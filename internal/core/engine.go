@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"pit/internal/config"
 	"pit/internal/services"
@@ -100,32 +102,44 @@ func (e *Engine) cleanupProjectRuntimes() {
 }
 
 // ---------- ENGINE START / STOP ----------
-// Mulai seluruh service
 func (e *Engine) StartAll() error {
 	fmt.Println("=== pit START ===")
 
 	pidFile := filepath.Join(e.BasePath, "runtime", "pit.pid")
 
-	if pid, err := ReadPID(pidFile); err == nil {
-		if util.IsAlive(pid) {
-			fmt.Println("pit already running.")
-			return nil
-		}
-		fmt.Println("Found stale pit PID, cleaning up ...")
-		KillPID(pidFile)
+	// 1️⃣ ALWAYS CLEAN FIRST (treat start like restart)
+	fmt.Println("[Init] Cleaning global runtimes...")
+	for i := len(e.Services) - 1; i >= 0; i-- {
+		_ = e.Services[i].Stop()
 	}
 
-	// tulis PID engine utama
+	// small wait to avoid race (php-fpm / nginx exit)
+	time.Sleep(300 * time.Millisecond)
+
+	// safety-net: kill PIT-owned php-fpm only (NOT OS php-fpm)
+	_ = exec.Command("pkill", "-f", e.ToolsPHPRuntime()).Run()
+	_ = exec.Command("pkill", "-f", filepath.Join(
+		e.BasePath,
+		"php",
+		e.Config.PHPVersion,
+		"etc",
+		"php-fpm.conf",
+	)).Run()
+
+	// cleanup runtime markers
+	_ = os.Remove(pidFile)
+	_ = os.Remove(e.ToolsPHPSocket())
+
+	// 2️⃣ WRITE PIT PID (AFTER CLEAN)
 	if err := os.MkdirAll(filepath.Dir(pidFile), 0o755); err != nil {
 		return fmt.Errorf("failed to create runtime dir: %w", err)
 	}
-	mainPID := os.Getpid()
-	if err := WritePID(pidFile, mainPID); err != nil {
+	if err := WritePID(pidFile, os.Getpid()); err != nil {
 		return fmt.Errorf("failed to write pit pid: %w", err)
 	}
 
 	// ============================================
-	// AUTO HOSTS GENERATOR (SCAN /WWW → ADD DOMAINS)
+	// AUTO HOSTS GENERATOR
 	// ============================================
 	wwwDir := filepath.Join(e.BasePath, "www")
 	entries, _ := os.ReadDir(wwwDir)
@@ -145,16 +159,13 @@ func (e *Engine) StartAll() error {
 	}
 	// ============================================
 
-	// start global services
+	// 3️⃣ START GLOBAL SERVICES (FRESH)
 	for _, s := range e.Services {
 		fmt.Println("Starting:", s.Name())
 		if err := s.Start(); err != nil {
 			return err
 		}
 	}
-
-	fmt.Println("Using BasePath:", e.BasePath)
-	fmt.Println("Scanning WWW:", filepath.Join(e.BasePath, "www"))
 
 	fmt.Println("pit running at http://localhost:8080")
 	return nil
@@ -163,23 +174,39 @@ func (e *Engine) StartAll() error {
 func (e *Engine) StopAll() error {
 	fmt.Println("=== pit STOP ===")
 
-	// stop global services
-	for _, s := range e.Services {
+	// 1️⃣ Stop global services (reverse order)
+	for i := len(e.Services) - 1; i >= 0; i-- {
+		s := e.Services[i]
 		fmt.Println("Stopping:", s.Name())
 		_ = s.Stop()
 	}
 
-	// kill project runtimes
-	fmt.Println("[ForceKill] Cleaning all project runtimes ...")
-	KillAllProjectRuntimes(e.BasePath)
+	// 2️⃣ WAIT for processes to exit (IMPORTANT)
+	time.Sleep(500 * time.Millisecond)
 
-	// kill pit main process (jika dipanggil dari luar)
+	// 3️⃣ VERIFY php-fpm benar-benar mati (safety net)
+	_ = exec.Command("pkill", "-f", e.BasePath+"/pit/runtime/_tools/php/php-fpm.conf").Run()
+	_ = exec.Command("pkill", "-f", e.BasePath+"/pit/php/"+e.Config.PHPVersion+"/etc/php-fpm.conf").Run()
+
+	// 4️⃣ Cleanup sockets (karena php-fpm unix socket)
+	_ = os.Remove(e.ToolsPHPSocket())
+	_ = os.Remove(filepath.Join(
+		e.BasePath,
+		"php",
+		e.Config.PHPVersion,
+		"var",
+		"run",
+		"php-fpm.sock",
+	))
+
+	// 5️⃣ REMOVE PID FILE (NO SELF KILL)
 	mainPIDFile := filepath.Join(e.BasePath, "runtime", "pit.pid")
-	KillPID(mainPIDFile)
+	_ = os.Remove(mainPIDFile)
 
 	fmt.Println("pit stopped cleanly.")
 	return nil
 }
+
 func (e *Engine) ReloadNginx() error {
 	for _, s := range e.Services {
 		if s.Name() == "nginx" {
@@ -208,7 +235,6 @@ func (e *Engine) ServiceStatuses() map[string]services.ServiceStatus {
 }
 
 // ---------- HELPERS (PID & PORT) ----------
-
 func killPidFile(pidFile string) {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -229,7 +255,8 @@ func killPidFile(pidFile string) {
 
 	proc, err := os.FindProcess(pid)
 	if err == nil {
-		_ = proc.Kill()
+		// GRACEFUL FIRST
+		_ = proc.Signal(syscall.SIGTERM)
 	}
 
 	_ = os.Remove(pidFile)
