@@ -105,32 +105,15 @@ func (e *Engine) cleanupProjectRuntimes() {
 func (e *Engine) StartAll() error {
 	fmt.Println("=== pit START ===")
 
-	pidFile := filepath.Join(e.BasePath, "runtime", "pit.pid")
+	// 1) STOP + CLEANUP (SAMA PERSIS DENGAN STOP)
+	fmt.Println("[Init] Cleaning global runtimes (stop-equivalent)...")
+	e.stopAndCleanupGlobals()
 
-	// 1️⃣ ALWAYS CLEAN FIRST (treat start like restart)
-	fmt.Println("[Init] Cleaning global runtimes...")
-	for i := len(e.Services) - 1; i >= 0; i-- {
-		_ = e.Services[i].Stop()
-	}
-
-	// small wait to avoid race (php-fpm / nginx exit)
+	// optional: extra kecil untuk race
 	time.Sleep(300 * time.Millisecond)
 
-	// safety-net: kill PIT-owned php-fpm only (NOT OS php-fpm)
-	_ = exec.Command("pkill", "-f", e.ToolsPHPRuntime()).Run()
-	_ = exec.Command("pkill", "-f", filepath.Join(
-		e.BasePath,
-		"php",
-		e.Config.PHPVersion,
-		"etc",
-		"php-fpm.conf",
-	)).Run()
-
-	// cleanup runtime markers
-	_ = os.Remove(pidFile)
-	_ = os.Remove(e.ToolsPHPSocket())
-
-	// 2️⃣ WRITE PIT PID (AFTER CLEAN)
+	// 2) WRITE PIT PID (AFTER CLEAN)
+	pidFile := filepath.Join(e.BasePath, "runtime", "pit.pid")
 	if err := os.MkdirAll(filepath.Dir(pidFile), 0o755); err != nil {
 		return fmt.Errorf("failed to create runtime dir: %w", err)
 	}
@@ -157,9 +140,8 @@ func (e *Engine) StartAll() error {
 			fmt.Println("[Hosts] Failed to update /etc/hosts:", err)
 		}
 	}
-	// ============================================
 
-	// 3️⃣ START GLOBAL SERVICES (FRESH)
+	// 3) START GLOBAL SERVICES (FRESH)
 	for _, s := range e.Services {
 		fmt.Println("Starting:", s.Name())
 		if err := s.Start(); err != nil {
@@ -167,28 +149,42 @@ func (e *Engine) StartAll() error {
 		}
 	}
 
-	fmt.Println("pit running at http://localhost:8080")
+	fmt.Println("pit running at http://localhost:7070")
 	return nil
 }
 
 func (e *Engine) StopAll() error {
 	fmt.Println("=== pit STOP ===")
+	e.stopAndCleanupGlobals()
+	fmt.Println("pit stopped cleanly.")
+	return nil
+}
 
-	// 1️⃣ Stop global services (reverse order)
+func (e *Engine) stopAndCleanupGlobals() {
+	// 1) Stop global services (reverse order)
 	for i := len(e.Services) - 1; i >= 0; i-- {
 		s := e.Services[i]
 		fmt.Println("Stopping:", s.Name())
 		_ = s.Stop()
 	}
 
-	// 2️⃣ WAIT for processes to exit (IMPORTANT)
+	// 2) WAIT for processes to exit
 	time.Sleep(500 * time.Millisecond)
 
-	// 3️⃣ VERIFY php-fpm benar-benar mati (safety net)
-	_ = exec.Command("pkill", "-f", e.BasePath+"/pit/runtime/_tools/php/php-fpm.conf").Run()
-	_ = exec.Command("pkill", "-f", e.BasePath+"/pit/php/"+e.Config.PHPVersion+"/etc/php-fpm.conf").Run()
+	// 3) SAFETY NET: pkill PIT-owned php-fpm only
+	// Tools runtime: runtime/_tools/php/php-fpm.conf
+	_ = exec.Command("pkill", "-f", filepath.Join(e.ToolsPHPRuntime(), "php-fpm.conf")).Run()
 
-	// 4️⃣ Cleanup sockets (karena php-fpm unix socket)
+	// Project/global php-fpm.conf (sesuai struktur lu sekarang)
+	_ = exec.Command("pkill", "-f", filepath.Join(
+		e.BasePath,
+		"php",
+		e.Config.PHPVersion,
+		"etc",
+		"php-fpm.conf",
+	)).Run()
+
+	// 4) Cleanup sockets
 	_ = os.Remove(e.ToolsPHPSocket())
 	_ = os.Remove(filepath.Join(
 		e.BasePath,
@@ -199,12 +195,8 @@ func (e *Engine) StopAll() error {
 		"php-fpm.sock",
 	))
 
-	// 5️⃣ REMOVE PID FILE (NO SELF KILL)
-	mainPIDFile := filepath.Join(e.BasePath, "runtime", "pit.pid")
-	_ = os.Remove(mainPIDFile)
-
-	fmt.Println("pit stopped cleanly.")
-	return nil
+	// 5) Remove PIT pid file
+	_ = os.Remove(filepath.Join(e.BasePath, "runtime", "pit.pid"))
 }
 
 func (e *Engine) ReloadNginx() error {
