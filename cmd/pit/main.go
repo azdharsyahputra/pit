@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"syscall"
+	"time"
 
 	"pit/internal/api"
 	"pit/internal/core"
@@ -33,9 +38,9 @@ func main() {
 		fmt.Println("✔ Setup completed")
 		os.Exit(0)
 
-	// ----------------------------
-	// START ENGINE
-	// ----------------------------
+		// ----------------------------
+		// START ENGINE
+		// ----------------------------
 	case "start":
 		results := engine.PreflightChecks()
 		if !printChecks(results) {
@@ -46,19 +51,66 @@ func main() {
 		fmt.Println("\n[Init] Cleaning project runtimes...")
 		engine.ForceKillAllProjectRuntimes()
 
-		fmt.Printf("Starting services.\n")
-		if err := engine.StartAll(); err != nil {
-			fmt.Println("Error starting services:", err)
-			os.Exit(1)
+		// SETUP SIGNAL HANDLER SEBELUM START (PENTING)
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+
+		var once sync.Once
+		shutdown := func(reason string) {
+			once.Do(func() {
+				fmt.Println("\n[Shutdown]", reason)
+				fmt.Println("[Shutdown] Stopping PIT services...")
+				if err := engine.StopAll(); err != nil {
+					fmt.Println("Error stopping engine:", err)
+					os.Exit(1)
+				}
+				fmt.Println("✔ Engine stopped")
+			})
 		}
 
+		// Ctrl+C kedua = force exit
+		force := make(chan os.Signal, 1)
+		signal.Notify(force, os.Interrupt)
+		go func() {
+			<-force
+			<-force
+			fmt.Println("\n[Force] Second interrupt => exiting now.")
+			os.Exit(1)
+		}()
+
+		// START ENGINE DI GOROUTINE BIAR GA NGE-BLOCK MAIN
+		startErrCh := make(chan error, 1)
+		go func() {
+			fmt.Printf("Starting services.\n")
+			startErrCh <- engine.StartAll()
+		}()
+
+		// API (tetep goroutine)
 		go func() {
 			fmt.Println("✔ API started on http://localhost:7070")
 			api.StartAPIServer(engine)
 		}()
 
-		fmt.Println("\nEngine is ready.")
-		select {}
+		fmt.Println("\nEngine is ready. Press Ctrl+C to stop.")
+
+		// WAIT: entah start gagal atau signal masuk
+		select {
+		case err := <-startErrCh:
+			if err != nil {
+				fmt.Println("Error starting services:", err)
+				shutdown("start failed")
+				os.Exit(1)
+			}
+			// kalau StartAll ternyata selesai cepat (harusnya enggak), tetap nunggu signal
+			<-ctx.Done()
+			shutdown("signal received")
+
+		case <-ctx.Done():
+			shutdown("signal received")
+		}
+
+		time.Sleep(150 * time.Millisecond)
+		os.Exit(0)
 
 	// ----------------------------
 	// STOP ENGINE

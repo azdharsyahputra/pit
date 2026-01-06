@@ -2,10 +2,11 @@
 /php/*
 /tools/*
 /runtime/*
+/www/*
 
 !/php/.gitkeep
 !/nginx/.gitkeep
 !/tools/.gitkeep
 !/runtime/.gitkeep
-
+!/www/.gitkeep
 #on development all asset important are built locally

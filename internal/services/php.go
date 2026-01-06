@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	util "pit/internal/utils"
 )
@@ -33,9 +35,24 @@ func (s *PHPService) basePath() string {
 func (s *PHPService) Start() error {
 	base := s.basePath()
 
-	util.KillPort(9099)
-	util.CleanupPID(filepath.Join(base, "logs/php-fpm.pid"))
+	pidFile := filepath.Join(base, "var", "run", "php-fpm.pid")
+	sockFile := filepath.Join(base, "var", "run", "php-fpm.sock")
+
 	util.PreparePHPDirs(base)
+
+	// === PREVENT DOUBLE START ===
+	if data, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+			if util.IsAlive(pid) {
+				fmt.Println("PHP-FPM already running, skip start")
+				return nil
+			}
+		}
+		_ = os.Remove(pidFile)
+	}
+
+	// remove stale socket
+	_ = os.Remove(sockFile)
 
 	fpmBin := filepath.Join(base, "sbin/php-fpm")
 	conf := filepath.Join(base, "etc/php-fpm.conf")
@@ -43,11 +60,12 @@ func (s *PHPService) Start() error {
 
 	fmt.Println("Starting PHP-FPM version", s.Version, "...")
 
-	cmd := exec.Command(fpmBin,
+	cmd := exec.Command(
+		fpmBin,
 		"-p", base,
 		"-y", conf,
 		"-c", ini,
-		"--daemonize",
+		"--nodaemonize",
 	)
 
 	cmd.Env = append(os.Environ(),
@@ -56,7 +74,8 @@ func (s *PHPService) Start() error {
 
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	return cmd.Start()
 }
 
 func (s *PHPService) Stop() error {
